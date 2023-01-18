@@ -198,7 +198,7 @@ def dump_object(save_dir, i):
     camera_matrix = rot @ camera_matrix
     np.save(f"{save_dir}/{i_str}_cam_pose.npy", camera_matrix)
 
-def collect_one_object(root_save_dir, uid, glb, num_samples=100, distance=1500.0, phi=2*np.pi/3):
+def collect_one_object(root_save_dir, uid, glb, num_samples=100, distance_range=[1500, 1500], phi_range=[2*np.pi/3, 2*np.pi/3], sweep=False):
     """
     Collect data for one object
 
@@ -220,8 +220,14 @@ def collect_one_object(root_save_dir, uid, glb, num_samples=100, distance=1500.0
     render_object(glb)
 
     for i in range(num_samples):
-        # rotate about a circle around the object. i controls the angle theta. phi controls the angle phi
-        theta = 2 * math.pi * i / num_samples
+        if sweep:
+            theta = i * 2 * np.pi / num_samples
+            phi = np.pi * 2 / 3
+            distance = 1500
+        else:
+            theta = np.random.uniform(0, 2*np.pi)
+            phi = np.random.uniform(phi_range[0], phi_range[1])
+            distance = np.random.uniform(distance_range[0], distance_range[1])
         x = math.cos(theta) * math.cos(phi)
         y = math.sin(theta) * math.cos(phi)
         z = math.sin(phi)
@@ -253,8 +259,10 @@ if __name__ == '__main__':
     parser.add_argument('--save_dir', type=str, default='./data', help='the directory to save the data to')
     parser.add_argument('--debug', action='store_true', help='if true, delete the save directory if it exists')
     parser.add_argument('--num_samples', type=int, default=100, help='the number of samples to take')
-    parser.add_argument('--distance', type=float, default=1500.0, help='the distance from the object to the camera')
-    parser.add_argument('--phi', type=float, default=2*np.pi/3, help='the angle to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)')
+    # add an argument for a range of distances from the camera to the object
+    parser.add_argument('--distance_range', type=float, nargs=2, default=[1500.0, 2500.0], help='the range of distances from the object to the camera')
+    # add an argument for the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)
+    parser.add_argument('--phi_range', type=float, nargs=2, default=[-np.pi/3, np.pi/3], help='the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)')
     parser.add_argument('--cat', type=str, default='faucet', help='the category to collect data for (e.g. faucet, chair, etc.)')
     parser.add_argument('--N', type=int, default=10, help='the number of objects to collect data for')
     parser.add_argument('--clear', action='store_true', help='if true, clear the cache before collecting data')
@@ -275,7 +283,8 @@ if __name__ == '__main__':
     bpy.context.scene.cycles.filter_width = 0.01
     bpy.context.scene.render.film_transparent = True
 
-    # bpy.context.scene.cycles.device = 'GPU'
+    if args.gpu:
+        bpy.context.scene.cycles.device = 'GPU'
     bpy.context.scene.cycles.diffuse_bounces = 1
     bpy.context.scene.cycles.glossy_bounces = 1
     bpy.context.scene.cycles.transparent_max_bounces = 3
@@ -313,7 +322,7 @@ if __name__ == '__main__':
 
     enable_cuda_devices()
 
-    save_dir = f"{args.save_dir}/{args.cat}{'_' + args.tag if args.tag else ''}"
+    save_dir = f"{args.save_dir}/{args.cat}{'_' + args.tag if args.tag else ''}{f'_debug' if args.debug else ''}"
 
     if args.debug or args.clear:
         # delete the save directory if it exists
@@ -342,7 +351,8 @@ if __name__ == '__main__':
         collect_one_object(save_dir,
                            f"{i}_{uid}",
                            glb,
-                           num_samples=10 if args.debug else args.num_samples,
-                           distance=args.distance,
-                           phi=2*np.pi/3)
+                           num_samples=24 if args.debug else args.num_samples,
+                           distance_range=args.distance_range,
+                           phi_range=args.phi_range,
+                           sweep=args.debug)
         i += 1
