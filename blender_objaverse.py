@@ -8,6 +8,7 @@ import cv2
 from PIL import Image
 import os
 import mediapy as mp
+import matplotlib.pyplot as plt
 
 def get_objaverse_objects(tag_list=["faucet"]):
     """
@@ -18,15 +19,22 @@ def get_objaverse_objects(tag_list=["faucet"]):
 
     :return: a dictionary of objects with the uid as the key, and the glb filepath as the value
     """
-    def find_tag(anno, tag_list=["faucet"]):
-        for tag in anno['tags']:
-            if tag['name'] in tag_list:
-                return True
 
-        return False
+    lvis_annotations = objaverse.load_lvis_annotations()
+    if tag_list[0] in lvis_annotations:
+        print("tag found in lvis annotations")
+        uids = lvis_annotations[tag_list[0]]
 
-    annotations = objaverse.load_annotations()
-    uids = [uid for uid, annotation in annotations.items() if find_tag(annotation, tag_list=tag_list)]
+    else:
+        def find_tag(anno, tag_list=["faucet"]):
+            for tag in anno['tags']:
+                if tag['name'] in tag_list:
+                    return True
+
+            return False
+
+        annotations = objaverse.load_annotations()
+        uids = [uid for uid, annotation in annotations.items() if find_tag(annotation, tag_list=tag_list)]
     obs = objaverse.load_objects(uids[:50])
 
     return obs
@@ -43,11 +51,10 @@ def save_rendered_image(camera, path, file_name):
     :type file_name: str
     """
     bpy.context.scene.camera = camera
-    bpy.context.scene.render.filepath = f"{path}/{file_name}"
+    # bpy.context.scene.render.filepath = f"{path}/{file_name}"
     bpy.ops.render.render(write_still=True)
     res = bpycv.render_data()
 
-    # ipdb checkpoint
     rgb_img = Image.fromarray(res['image'])
     rgb_img.save(f"{path}/{file_name}_rgb.png")
 
@@ -56,13 +63,11 @@ def save_rendered_image(camera, path, file_name):
     mask_img = Image.fromarray(np.uint8(mask))
     mask_img.save(f"{path}/{file_name}_mask.png")
 
-    depth_img = Image.fromarray(np.uint16(res['depth'] * 1000))
-    depth_img.save(f"{path}/{file_name}_depth_vis.png")
-
     # change depth shape from (640, 640) to (640, 640, 3)
     depth = (res["depth"] / 1000) # default blender units is mm, switch to meters
     depth = np.stack((depth, depth, depth), axis=2)
     np.save(f"{path}/{file_name}_depth.npy", depth)
+    plt.imsave(f"{path}/{file_name}_depth_vis.png", depth[..., 0])
 
 
 def rotate_camera(camera, focus_point=mathutils.Vector((0.0, 0.0, 0.0)), location=mathutils.Vector((0.0, 0.0, 0.0)), distance=50.0):
@@ -157,15 +162,15 @@ def render_object(object):
     bpy.context.object.data.clip_end = 10000
 
     # add an area light that points to the origin and is high up
-    bpy.ops.object.light_add(type='SUN', location=(0, 0, 2000), rotation=(0, 0, 0))
-    bpy.context.object.data.energy = 2.0
+    bpy.ops.object.light_add(type='SUN', location=(0, 0, 10000), rotation=(0, 0, 0))
+    bpy.context.object.data.energy = 10.0
 
-    bpy.ops.object.light_add(type='AREA')
-    light2 = bpy.data.lights['Area']
-    light2.energy = 30000
-    bpy.data.objects['Area'].scale[0] = 1000
-    bpy.data.objects['Area'].scale[1] = 1000
-    bpy.data.objects['Area'].scale[2] = 1000
+    # bpy.ops.object.light_add(type='AREA')
+    # light2 = bpy.data.lights['Area']
+    # light2.energy = 30000
+    # bpy.data.objects['Area'].scale[0] = 1000
+    # bpy.data.objects['Area'].scale[1] = 1000
+    # bpy.data.objects['Area'].scale[2] = 1000
 
 def dump_object(save_dir, i):
     """
@@ -221,6 +226,9 @@ def collect_one_object(root_save_dir, uid, glb, num_samples=100, distance_range=
     """
 
     save_dir = f"{root_save_dir}/{uid}"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
     render_object(glb)
 
     for i in range(num_samples):
