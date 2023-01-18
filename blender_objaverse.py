@@ -196,6 +196,10 @@ def dump_object(save_dir, i):
                     [0,  0,  0,  1]])
 
     camera_matrix = rot @ camera_matrix
+
+    # IMPORTANT: convert the translation of the camera matrix to meters
+    camera_matrix[:3, 3] /= 1000
+
     np.save(f"{save_dir}/{i_str}_cam_pose.npy", camera_matrix)
 
 def collect_one_object(root_save_dir, uid, glb, num_samples=100, distance_range=[1500, 1500], phi_range=[2*np.pi/3, 2*np.pi/3], sweep=False):
@@ -322,7 +326,7 @@ if __name__ == '__main__':
 
     enable_cuda_devices()
 
-    save_dir = f"{args.save_dir}/{args.cat}{'_' + args.tag if args.tag else ''}{f'_debug' if args.debug else ''}"
+    save_dir = f"{args.save_dir}/{args.cat}{'_' + args.tag if args.tag else ''}_{'debug' if args.debug else args.num_samples}"
 
     if args.debug or args.clear:
         # delete the save directory if it exists
@@ -351,7 +355,7 @@ if __name__ == '__main__':
         collect_one_object(save_dir,
                            f"{i}_{uid}",
                            glb,
-                           num_samples=24 if args.debug else args.num_samples,
+                           num_samples=100 if args.debug else args.num_samples,
                            distance_range=args.distance_range,
                            phi_range=args.phi_range,
                            sweep=args.debug)
