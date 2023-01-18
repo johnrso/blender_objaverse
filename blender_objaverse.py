@@ -2,6 +2,7 @@ import bpy, bpycv
 from bpycv import pose_utils
 import objaverse
 import math, mathutils
+from mathutils import Vector, Matrix
 import numpy as np
 import cv2
 from PIL import Image
@@ -57,6 +58,7 @@ def save_rendered_image(camera, path, file_name):
 
     depth_img = Image.fromarray(np.uint16(res['depth'] * 1000))
     depth_img.save(f"{path}/{file_name}_depth_vis.png")
+
     # change depth shape from (640, 640) to (640, 640, 3)
     depth = (res["depth"] / 1000) # default blender units is mm, switch to meters
     depth = np.stack((depth, depth, depth), axis=2)
@@ -94,9 +96,58 @@ def render_object(object):
     :type object: str
 
     """
+    print(object)
     # clear the scene
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
+
+    # import the object
+    bpy.ops.import_scene.gltf(filepath=object)
+
+    # merge the mesh into one object. this is so that the object's dimensions can be calculated
+    for this_obj in bpy.data.objects:
+        if this_obj.type == "MESH":
+            this_obj.select_set(True)
+            bpy.context.view_layer.objects.active = this_obj
+            # bpy.ops.object.mode_set(mode='EDIT')
+            # bpy.ops.mesh.split_normals()
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+    # get the dimensions of all selected objects
+    # print([x.dimensions for x in bpy.context.selected_objects])
+    bpy.ops.object.join()
+    bpy.ops.object.select_all(action='DESELECT')
+
+    # select the mesh object
+    for this_obj in bpy.data.objects:
+        if this_obj.type == "MESH":
+            bpy.context.view_layer.objects.active = this_obj
+            this_obj.select_set(True)
+
+    # get the dimensions of the object
+    obj = bpy.context.selected_objects[0]
+    context.view_layer.objects.active = obj
+    scale = max(obj.dimensions)
+
+    # clear the scene again and import the object again
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    bpy.ops.import_scene.gltf(filepath=object)
+
+    # merge the mesh into one object. this is so that the object's dimensions can be calculated
+    for this_obj in bpy.data.objects:
+        if this_obj.type == "MESH":
+            this_obj['inst_id'] = 1001
+            this_obj.select_set(True)
+            bpy.context.view_layer.objects.active = this_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+            bpy.ops.mesh.split_normals()
+
+    bpy.ops.transform.resize(value=(500/scale, 500/scale, 500/scale))
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.select_all(action='DESELECT')
+
+    # import ipdb; ipdb.set_trace()
 
     # add a camera
     bpy.ops.object.camera_add(location=(0, 0, 0), rotation=(0, 0, 0))
@@ -105,39 +156,16 @@ def render_object(object):
     bpy.context.scene.render.resolution_y = 640
     bpy.context.object.data.clip_end = 10000
 
-    # add a light that points to the origin and is high up
-    bpy.ops.object.light_add(type='SUN', location=(0, 0, 1000), rotation=(0, 0, 0))
-    bpy.context.object.data.energy = 1.0
+    # add an area light that points to the origin and is high up
+    bpy.ops.object.light_add(type='SUN', location=(0, 0, 2000), rotation=(0, 0, 0))
+    bpy.context.object.data.energy = 2.0
 
-    # import the object
-    bpy.ops.import_scene.gltf(filepath=object)
-
-    # set the object to the origin
-    bpy.context.object.location = (0, 0, 0)
-
-    # go through all meshes and find the highest and lowest vertical points
-    highest_point = 0
-    lowest_point = 0
-    for obj in bpy.data.objects:
-        if obj.type == 'MESH':
-            obj['inst_id'] = 1001
-            for vert in obj.data.vertices:
-                if vert.co[2] > highest_point:
-                    highest_point = vert.co[2]
-                if vert.co[2] < lowest_point:
-                    lowest_point = vert.co[2]
-
-    # resize all objects to be .5 meter tall
-    # get the size of the object
-    z = highest_point - lowest_point
-
-    # select all mesh objects
-    bpy.ops.object.select_all(action='DESELECT')
-    for obj in bpy.data.objects:
-        if obj.type == 'MESH':
-            obj.select_set(True)
-
-    bpy.ops.transform.resize(value=(300/z, 300/z, 300/z))
+    bpy.ops.object.light_add(type='AREA')
+    light2 = bpy.data.lights['Area']
+    light2.energy = 30000
+    bpy.data.objects['Area'].scale[0] = 1000
+    bpy.data.objects['Area'].scale[1] = 1000
+    bpy.data.objects['Area'].scale[2] = 1000
 
 def dump_object(save_dir, i):
     """
@@ -160,7 +188,7 @@ def dump_object(save_dir, i):
 
     camera_matrix = pose_utils.get_4x4_world_to_cam_from_blender(bpy.context.scene.camera)
 
-    # camera_matrix is currently RDF; convert to FLU
+    # camera_matrix is currently uvz (RDF); convert to FLU
     # note that this is the same as in get_uvz_to_sapien
     rot = np.array([[0, -1,  0,  0],
                     [0,  0, -1,  0],
@@ -170,7 +198,7 @@ def dump_object(save_dir, i):
     camera_matrix = rot @ camera_matrix
     np.save(f"{save_dir}/{i_str}_cam_pose.npy", camera_matrix)
 
-def collect_one_object(root_save_dir, uid, glb, num_samples=100, distance=1000.0, phi=2*np.pi/3):
+def collect_one_object(root_save_dir, uid, glb, num_samples=100, distance=1500.0, phi=2*np.pi/3):
     """
     Collect data for one object
 
@@ -213,7 +241,7 @@ def collect_one_object(root_save_dir, uid, glb, num_samples=100, distance=1000.0
         return rgb_images
 
     rgb_images = load_rgb_images(save_dir)
-    mp.write_video(f"{save_dir}/_pan.mp4", rgb_images, fps=10)
+    mp.write_video(f"{save_dir}/_pan.mp4", rgb_images, fps=len(rgb_images))
 
 # use argv to get the filename from the command line and the run in a main wrapper
 if __name__ == '__main__':
@@ -225,14 +253,67 @@ if __name__ == '__main__':
     parser.add_argument('--save_dir', type=str, default='./data', help='the directory to save the data to')
     parser.add_argument('--debug', action='store_true', help='if true, delete the save directory if it exists')
     parser.add_argument('--num_samples', type=int, default=100, help='the number of samples to take')
-    parser.add_argument('--distance', type=float, default=1000.0, help='the distance from the object to the camera')
+    parser.add_argument('--distance', type=float, default=1500.0, help='the distance from the object to the camera')
     parser.add_argument('--phi', type=float, default=2*np.pi/3, help='the angle to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)')
     parser.add_argument('--cat', type=str, default='faucet', help='the category to collect data for (e.g. faucet, chair, etc.)')
     parser.add_argument('--N', type=int, default=10, help='the number of objects to collect data for')
     parser.add_argument('--clear', action='store_true', help='if true, clear the cache before collecting data')
+    parser.add_argument('--gpu', action='store_true', help='if true, use the GPU')
+    parser.add_argument('--tag', type=str, default='', help='a tag to add to the save directory')
     args = parser.parse_args()
 
-    save_dir = f"{args.save_dir}/{args.cat}"
+    context = bpy.context
+    scene = bpy.context.scene
+    render = bpy.context.scene.render
+
+    render.engine = "CYCLES"
+    render.image_settings.color_mode = 'RGBA'  # ('RGB', 'RGBA', ...)
+    render.image_settings.file_format = 'PNG'
+    render.resolution_x = 640
+    render.resolution_y = 640
+    render.resolution_percentage = 100
+    bpy.context.scene.cycles.filter_width = 0.01
+    bpy.context.scene.render.film_transparent = True
+
+    # bpy.context.scene.cycles.device = 'GPU'
+    bpy.context.scene.cycles.diffuse_bounces = 1
+    bpy.context.scene.cycles.glossy_bounces = 1
+    bpy.context.scene.cycles.transparent_max_bounces = 3
+    bpy.context.scene.cycles.transmission_bounces = 3
+    bpy.context.scene.cycles.samples = 32
+    bpy.context.scene.cycles.use_denoising = True
+
+    def enable_cuda_devices():
+        prefs = bpy.context.preferences
+        cprefs = prefs.addons['cycles'].preferences
+        cprefs.get_devices()
+
+        # Attempt to set GPU device types if available
+        for compute_device_type in ('CUDA', 'OPENCL', 'NONE'):
+            try:
+                cprefs.compute_device_type = compute_device_type
+                print("Compute device selected: {0}".format(compute_device_type))
+                break
+            except TypeError:
+                pass
+
+        # Any CUDA/OPENCL devices?
+        acceleratedTypes = ['CUDA', 'OPENCL']
+        accelerated = any(device.type in acceleratedTypes for device in cprefs.devices)
+        print('Accelerated render = {0}'.format(accelerated))
+
+        # If we have CUDA/OPENCL devices, enable only them, otherwise enable
+        # all devices (assumed to be CPU)
+        print(cprefs.devices)
+        for device in cprefs.devices:
+            device.use = not accelerated or device.type in acceleratedTypes
+            print('Device enabled ({type}) = {enabled}'.format(type=device.type, enabled=device.use))
+
+        return accelerated
+
+    enable_cuda_devices()
+
+    save_dir = f"{args.save_dir}/{args.cat}{'_' + args.tag if args.tag else ''}"
 
     if args.debug or args.clear:
         # delete the save directory if it exists
