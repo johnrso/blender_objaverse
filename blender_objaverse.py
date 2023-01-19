@@ -9,253 +9,315 @@ from PIL import Image
 import os
 import mediapy as mp
 import matplotlib.pyplot as plt
+import random
 
-def get_objaverse_objects(tag_list=["faucet"]):
-    """
-    Get a list of objects from the objaverse with the given tag list
+class BlenderObjaverseRenderer:
+    def __init__(self, args):
 
-    :param tag_list: the list of tags to search for
-    :type tag_list: list
+        self.context = bpy.context
+        self.scene = self.context.scene
+        self.render = self.scene.render
 
-    :return: a dictionary of objects with the uid as the key, and the glb filepath as the value
-    """
+        self.render.engine = "CYCLES"
+        self.render.image_settings.color_mode = 'RGBA'  # ('RGB', 'RGBA', ...)
+        self.render.image_settings.file_format = 'PNG'
+        self.render.resolution_x = 224
+        self.render.resolution_y = 224
+        self.render.resolution_percentage = 100
+        bpy.context.scene.cycles.filter_width = 0.01
+        bpy.context.scene.render.film_transparent = True
 
-    lvis_annotations = objaverse.load_lvis_annotations()
-    if tag_list[0] in lvis_annotations:
-        print("tag found in lvis annotations")
-        uids = lvis_annotations[tag_list[0]]
+        if args.gpu:
+            bpy.context.scene.cycles.device = 'GPU'
+        bpy.context.scene.cycles.diffuse_bounces = 1
+        bpy.context.scene.cycles.glossy_bounces = 1
+        bpy.context.scene.cycles.transparent_max_bounces = 3
+        bpy.context.scene.cycles.transmission_bounces = 3
+        bpy.context.scene.cycles.samples = 32
+        bpy.context.scene.cycles.use_denoising = True
 
-    else:
-        def find_tag(anno, tag_list=["faucet"]):
-            for tag in anno['tags']:
-                if tag['name'] in tag_list:
-                    return True
+        self.save_dir = f"{args.save_dir}/{args.cat}{'_' + args.tag if args.tag else ''}{f'_debug' if args.debug else ''}"
+        if args.debug or args.clear:
+            # delete the save directory if it exists
+            if os.path.exists(self.save_dir):
+                import shutil
+                shutil.rmtree(self.save_dir)
 
-            return False
+        # create the save directory if it doesn't exist
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
 
-        annotations = objaverse.load_annotations()
-        uids = [uid for uid, annotation in annotations.items() if find_tag(annotation, tag_list=tag_list)]
-    obs = objaverse.load_objects(uids[:50])
+        # in save_dir, dump the arguments into a json file
+        import json
+        with open(f"{self.save_dir}/args.json", 'w') as f:
+            json.dump(vars(args), f, indent=4)
 
-    return obs
+        self.cam = self.scene.objects["Camera"]
+        self.cam.location = (0, 1.2, 0)
+        self.cam.data.lens = 35
+        self.cam.data.sensor_width = 32
 
-def save_rendered_image(camera, path, file_name):
-    """
-    Save the rendered image from the given camera to the given path
+        self.cam_constraint = self.cam.constraints.new(type="TRACK_TO")
+        self.cam_constraint.track_axis = "TRACK_NEGATIVE_Z"
+        self.cam_constraint.up_axis = "UP_Y"
 
-    :param camera: the camera to render from
-    :type camera: bpy.types.Object
-    :param path: the path to save the image to
-    :type path: str
-    :param file_name: the name of the file to save
-    :type file_name: str
-    """
-    bpy.context.scene.camera = camera
-    # bpy.context.scene.render.filepath = f"{path}/{file_name}"
-    bpy.ops.render.render(write_still=True)
-    res = bpycv.render_data()
+        # setup lighting
+        bpy.ops.object.light_add(type="AREA")
+        self.light2 = bpy.data.lights["Area"]
+        self.light2.energy = 30000
+        bpy.data.objects["Area"].location[2] = 0.5
+        bpy.data.objects["Area"].scale[0] = 100
+        bpy.data.objects["Area"].scale[1] = 100
+        bpy.data.objects["Area"].scale[2] = 100
 
-    rgb_img = Image.fromarray(res['image'])
-    rgb_img.save(f"{path}/{file_name}_rgb.png")
+        self.mesh = None
+        self.num_samples = args.num_samples
+        self.distance_range = args.distance_range
+        self.phi_range = args.phi_range
+        self.debug = args.debug
 
-    mask = (res["inst"] / 1001 * 255)
-    mask = np.stack((mask, mask, mask), axis=2)
-    mask_img = Image.fromarray(np.uint8(mask))
-    mask_img.save(f"{path}/{file_name}_mask.png")
-
-    # change depth shape from (640, 640) to (640, 640, 3)
-    depth = (res["depth"] / 1000) # default blender units is mm, switch to meters
-    depth = np.stack((depth, depth, depth), axis=2)
-    np.save(f"{path}/{file_name}_depth.npy", depth)
-    plt.imsave(f"{path}/{file_name}_depth_vis.png", depth[..., 0])
+    def randomize_lighting(self):
+        self.light2.energy = random.uniform(5000, 35000)
+        bpy.data.objects["Area"].location[0] = 0
+        bpy.data.objects["Area"].location[1] = 0
+        bpy.data.objects["Area"].location[2] = random.uniform(1, 2)
 
 
-def rotate_camera(camera, focus_point=mathutils.Vector((0.0, 0.0, 0.0)), location=mathutils.Vector((0.0, 0.0, 0.0)), distance=50.0):
-    """
-    Moves the camera, then focuses the camera to a focus point and place the camera at a specific distance from that
-    focus point. The camera stays in a direct line with the focus point.
+    def reset_lighting(self):
+        self.light2.energy = 30_000
+        bpy.data.objects["Area"].location[0] = 0
+        bpy.data.objects["Area"].location[1] = 0
+        bpy.data.objects["Area"].location[2] = 0.5
 
-    :param camera: the camera to move
-    :type camera: bpy.types.Object
-    :param focus_point: the point to focus on
-    :type focus_point: mathutils.Vector
-    :param location: the location of the camera
-    :type location: mathutils.Vector
-    :param distance: the distance from the camera to the focus point
-    :type distance: float
-    """
-    camera.location = location
 
-    looking_direction = camera.location - focus_point
-    rot_quat = looking_direction.to_track_quat('Z', 'Y')
+    def join_meshes(self) -> bpy.types.Object:
+        """Joins all the meshes in the scene into one mesh."""
+        # get all the meshes in the scene
+        meshes = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+        # join all of the meshes
+        bpy.ops.object.select_all(action="DESELECT")
+        for mesh in meshes:
+            mesh.select_set(True)
+            bpy.context.view_layer.objects.active = mesh
+        # join the meshes
+        bpy.ops.object.join()
 
-    camera.rotation_euler = rot_quat.to_euler()
-    camera.location = rot_quat @ mathutils.Vector((0.0, 0.0, distance))
+        meshes = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+        assert len(meshes) == 1
+        mesh = meshes[0]
+        self.mesh = mesh
+        self.mesh['inst_id'] = 1001
 
-def render_object(object):
-    """
-    Render the given object. Clears the scene before rendering and adds a camera and light.
-    The object is placed at the origin.
 
-    :param object: the glb file of the object to render
-    :type object: str
+    def center_mesh(self):
+        """Centers the mesh at the origin."""
+        # select the mesh
+        bpy.ops.object.select_all(action="DESELECT")
+        self.mesh.select_set(True)
+        # clear and keep the transformation of the parent
+        bpy.ops.object.parent_clear(type="CLEAR_KEEP_TRANSFORM")
+        # set the mesh position to the origin, use the bounding box center
+        bpy.ops.object.origin_set(type="ORIGIN_GEOMETRY", center="BOUNDS")
+        bpy.context.object.location = (0, 0, 0)
+        # 0 out the transform
+        bpy.ops.object.transforms_to_deltas(mode="ALL")
 
-    """
-    print(object)
-    # clear the scene
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete(use_global=False)
 
-    # import the object
-    bpy.ops.import_scene.gltf(filepath=object)
+    def resize_object(self, max_side_length_meters) -> None:
+        """Resizes the object to have a max side length of max_side_length_meters meters."""
+        # select the mesh
+        bpy.ops.object.select_all(action="DESELECT")
+        self.mesh.select_set(True)
+        # get the bounding box
+        x_size, y_size, z_size = self.mesh.dimensions
+        # get the max side length
+        curr_max_side_length = max([x_size, y_size, z_size])
+        # get the scale factor
+        scale_factor = max_side_length_meters / curr_max_side_length
+        # scale the object
+        bpy.ops.transform.resize(value=(scale_factor, scale_factor, scale_factor))
+        # 0 out the transform
+        bpy.ops.object.transforms_to_deltas(mode="ALL")
 
-    # merge the mesh into one object. this is so that the object's dimensions can be calculated
-    for this_obj in bpy.data.objects:
-        if this_obj.type == "MESH":
-            this_obj.select_set(True)
-            bpy.context.view_layer.objects.active = this_obj
-            # bpy.ops.object.mode_set(mode='EDIT')
-            # bpy.ops.mesh.split_normals()
 
-    bpy.ops.object.mode_set(mode='OBJECT')
-    # get the dimensions of all selected objects
-    # print([x.dimensions for x in bpy.context.selected_objects])
-    bpy.ops.object.join()
-    bpy.ops.object.select_all(action='DESELECT')
+    def reset_scene(self):
+        """Resets the scene to a clean state."""
+        # delete everything that isn't part of a camera or a light
+        for obj in bpy.data.objects:
+            if obj.type not in {"CAMERA", "LIGHT"}:
+                bpy.data.objects.remove(obj, do_unlink=True)
+        # delete all the materials
+        for material in bpy.data.materials:
+            bpy.data.materials.remove(material, do_unlink=True)
+        # delete all the textures
+        for texture in bpy.data.textures:
+            bpy.data.textures.remove(texture, do_unlink=True)
+        # delete all the images
+        for image in bpy.data.images:
+            bpy.data.images.remove(image, do_unlink=True)
 
-    # select the mesh object
-    for this_obj in bpy.data.objects:
-        if this_obj.type == "MESH":
-            bpy.context.view_layer.objects.active = this_obj
-            this_obj.select_set(True)
+    # load the glb model
+    def load_object(self, object_path: str) -> None:
+        """Loads a glb model into the scene."""
+        assert object_path.endswith(".glb")
+        bpy.ops.import_scene.gltf(filepath=object_path, merge_vertices=True)
 
-    # get the dimensions of the object
-    obj = bpy.context.selected_objects[0]
-    context.view_layer.objects.active = obj
-    scale = max(obj.dimensions)
+    def render_object(self, glb):
+        self.reset_scene()
+        self.load_object(glb)
+        self.join_meshes()
+        self.center_mesh()
+        self.resize_object(0.7)
 
-    # clear the scene again and import the object again
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete(use_global=False)
-    bpy.ops.import_scene.gltf(filepath=object)
+        # render the object
+        self.randomize_lighting()
 
-    # merge the mesh into one object. this is so that the object's dimensions can be calculated
-    for this_obj in bpy.data.objects:
-        if this_obj.type == "MESH":
-            this_obj['inst_id'] = 1001
-            this_obj.select_set(True)
-            bpy.context.view_layer.objects.active = this_obj
-            bpy.ops.object.mode_set(mode='EDIT')
-            bpy.ops.mesh.split_normals()
+    def get_objaverse_objects(self, tag_list=["faucet"], lvis=True):
+        """
+        Get a list of objects from the objaverse with the given tag list
 
-    bpy.ops.transform.resize(value=(500/scale, 500/scale, 500/scale))
-    bpy.ops.object.mode_set(mode='OBJECT')
-    bpy.ops.object.select_all(action='DESELECT')
+        :param tag_list: the list of tags to search for
+        :type tag_list: list
 
-    # import ipdb; ipdb.set_trace()
+        :return: a dictionary of objects with the uid as the key, and the glb filepath as the value
+        """
 
-    # add a camera
-    bpy.ops.object.camera_add(location=(0, 0, 0), rotation=(0, 0, 0))
-    bpy.context.scene.camera = bpy.context.object
-    bpy.context.scene.render.resolution_x = 640
-    bpy.context.scene.render.resolution_y = 640
-    bpy.context.object.data.clip_end = 10000
+        lvis_annotations = objaverse.load_lvis_annotations()
+        if tag_list[0] in lvis_annotations and lvis:
+            print("tag found in lvis annotations")
+            uids = lvis_annotations[tag_list[0]]
 
-    # add an area light that points to the origin and is high up
-    bpy.ops.object.light_add(type='SUN', location=(0, 0, 10000), rotation=(0, 0, 0))
-    bpy.context.object.data.energy = 10.0
-
-    # bpy.ops.object.light_add(type='AREA')
-    # light2 = bpy.data.lights['Area']
-    # light2.energy = 30000
-    # bpy.data.objects['Area'].scale[0] = 1000
-    # bpy.data.objects['Area'].scale[1] = 1000
-    # bpy.data.objects['Area'].scale[2] = 1000
-
-def dump_object(save_dir, i):
-    """
-    Dump the captured render, the camera matrix, and the depth map to the given directory
-
-    :param save_dir: the directory to save the data to
-    :type: save_dir: str
-    :param i: the index of the object
-    :type: int
-    """
-
-    # set the index as a string padded to 6 digits
-    i_str = str(i).zfill(6)
-
-    # save the rendered image
-    save_rendered_image(bpy.context.scene.camera, save_dir, f"{i_str}")
-
-    # save the camera matrix
-    # camera_matrix = bpy.context.scene.camera.matrix_world
-
-    camera_matrix = pose_utils.get_4x4_world_to_cam_from_blender(bpy.context.scene.camera)
-
-    # camera_matrix is currently uvz (RDF); convert to FLU
-    # note that this is the same as in get_uvz_to_sapien
-    rot = np.array([[0, -1,  0,  0],
-                    [0,  0, -1,  0],
-                    [1,  0,  0,  0],
-                    [0,  0,  0,  1]])
-
-    camera_matrix = rot @ camera_matrix
-    np.save(f"{save_dir}/{i_str}_cam_pose.npy", camera_matrix)
-
-def collect_one_object(root_save_dir, uid, glb, num_samples=100, distance_range=[1500, 1500], phi_range=[2*np.pi/3, 2*np.pi/3], sweep=False):
-    """
-    Collect data for one object
-
-    :param root_save_dir: the root directory to save the data to
-    :type root_save_dir: str
-    :param uid: the uid of the object
-    :type uid: str
-    :param glb: the glb file of the object
-    :type glb: str
-    :param num_samples: the number of samples to take
-    :type num_samples: int
-    :param distance: the distance from the object to the camera
-    :type distance: float
-    :param phi: the angle to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)
-    :type phi: float
-    """
-
-    save_dir = f"{root_save_dir}/{uid}"
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-
-    render_object(glb)
-
-    for i in range(num_samples):
-        if sweep:
-            theta = i * 2 * np.pi / num_samples
-            phi = np.pi * 2 / 3
-            distance = 1500
         else:
-            theta = np.random.uniform(0, 2*np.pi)
-            phi = np.random.uniform(phi_range[0], phi_range[1])
-            distance = np.random.uniform(distance_range[0], distance_range[1])
-        x = math.cos(theta) * math.cos(phi)
-        y = math.sin(theta) * math.cos(phi)
-        z = math.sin(phi)
+            def find_tag(anno, tag_list=["faucet"]):
+                for tag in anno['tags']:
+                    if tag['name'] in tag_list:
+                        return True
 
-        rotate_camera(bpy.context.scene.camera, location=mathutils.Vector((x, y, z)), distance=distance)
-        dump_object(save_dir, i)
+                return False
 
-    # create a video of all of the images that end in rgb.png
-    def load_rgb_images(folder):
-        rgb_images = []
-        for file in os.listdir(folder):
-            if file.endswith("rgb.png"):
-                rgb_images.append(Image.open((os.path.join(folder, file))))
-        # sort the images by the index
-        rgb_images.sort(key=lambda x: int(x.filename.split('/')[-1].split('_')[0]))
-        rgb_images = [np.array(img) for img in rgb_images]
-        return rgb_images
+            annotations = objaverse.load_annotations()
+            uids = [uid for uid, annotation in annotations.items() if find_tag(annotation, tag_list=tag_list)]
+        obs = objaverse.load_objects(uids[:50])
 
-    rgb_images = load_rgb_images(save_dir)
-    mp.write_video(f"{save_dir}/_pan.mp4", rgb_images, fps=len(rgb_images))
+        return obs
+
+    def save_rendered_image(self, path, file_name):
+        """
+        Save the rendered image from the given camera to the given path
+
+        :param camera: the camera to render from
+        :type camera: bpy.types.Object
+        :param path: the path to save the image to
+        :type path: str
+        :param file_name: the name of the file to save
+        :type file_name: str
+        """
+        bpy.context.scene.camera = self.cam
+        bpy.ops.render.render(write_still=True)
+        res = bpycv.render_data()
+
+        rgb_img = Image.fromarray(res['image'])
+        rgb_img.save(f"{path}/{file_name}_rgb.png")
+
+        mask = (res["inst"] / 1001 * 255)
+        mask = np.stack((mask, mask, mask), axis=2)
+        mask_img = Image.fromarray(np.uint8(mask))
+        mask_img.save(f"{path}/{file_name}_mask.png")
+
+        # change depth shape from (224, 224) to (224, 224, 3)
+        depth = (res["depth"]) # default blender units is mm, switch to meters
+        depth = np.stack((depth, depth, depth), axis=2)
+        np.save(f"{path}/{file_name}_depth.npy", depth)
+        plt.imsave(f"{path}/{file_name}_depth_vis.png", depth[..., 0])
+
+    def dump_object(self, save_dir, i):
+        """
+        Dump the captured render, the camera matrix, and the depth map to the given directory
+
+        :param save_dir: the directory to save the data to
+        :type: save_dir: str
+        :param i: the index of the object
+        :type: int
+        """
+
+        # set the index as a string padded to 6 digits
+        i_str = str(i).zfill(6)
+        self.randomize_lighting()
+        # save the rendered image
+        self.save_rendered_image(save_dir, f"{i_str}")
+        self.reset_lighting()
+        # save the camera matrix
+        # camera_matrix = bpy.context.scene.camera.matrix_world
+
+        camera_matrix = pose_utils.get_4x4_world_to_cam_from_blender(bpy.context.scene.camera)
+
+        # camera_matrix is currently uvz (RDF); convert to FLU
+        # note that this is the same as in get_uvz_to_sapien
+        rot = np.array([[0, -1,  0,  0],
+                        [0,  0, -1,  0],
+                        [1,  0,  0,  0],
+                        [0,  0,  0,  1]])
+
+        camera_matrix = rot @ camera_matrix
+        np.save(f"{save_dir}/{i_str}_cam_pose.npy", camera_matrix)
+
+    def collect_one_object(self, uid, glb):
+        """
+        Collect data for one object
+
+        :param root_save_dir: the root directory to save the data to
+        :type root_save_dir: str
+        :param uid: the uid of the object
+        :type uid: str
+        :param glb: the glb file of the object
+        :type glb: str
+        :param num_samples: the number of samples to take
+        :type num_samples: int
+        :param distance: the distance from the object to the camera
+        :type distance: float
+        :param phi: the angle to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)
+        :type phi: float
+        """
+
+
+        save_dir = f"{self.save_dir}/{uid}"
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        self.render_object(glb)
+
+        num_samples = 24 if self.debug else self.num_samples
+        for i in range(num_samples):
+            if self.debug:
+                theta = i * 2 * np.pi / num_samples
+                phi = np.pi / 4
+                distance = 1.5
+            else:
+                theta = np.random.uniform(0, 2*np.pi)
+                phi = np.random.uniform(self.phi_range[0], self.phi_range[1])
+                distance = np.random.uniform(self.distance_range[0], self.distance_range[1])
+            x = math.cos(theta) * math.cos(phi) * distance
+            y = math.sin(theta) * math.cos(phi) * distance
+            z = math.sin(phi) * distance
+
+
+            self.cam_constraint.target = self.mesh
+            self.cam.location = (x, y, z)
+            self.dump_object(save_dir, i)
+
+        # create a video of all of the images that end in rgb.png
+        def load_rgb_images(folder):
+            rgb_images = []
+            for file in os.listdir(folder):
+                if file.endswith("rgb.png"):
+                    rgb_images.append(Image.open((os.path.join(folder, file))))
+            # sort the images by the index
+            rgb_images.sort(key=lambda x: int(x.filename.split('/')[-1].split('_')[0]))
+            rgb_images = [np.array(img) for img in rgb_images]
+            return rgb_images
+
+        rgb_images = load_rgb_images(save_dir)
+        mp.write_video(f"{save_dir}/_pan.mp4", rgb_images, fps=len(rgb_images))
 
 # use argv to get the filename from the command line and the run in a main wrapper
 if __name__ == '__main__':
@@ -268,7 +330,7 @@ if __name__ == '__main__':
     parser.add_argument('--debug', action='store_true', help='if true, delete the save directory if it exists')
     parser.add_argument('--num_samples', type=int, default=100, help='the number of samples to take')
     # add an argument for a range of distances from the camera to the object
-    parser.add_argument('--distance_range', type=float, nargs=2, default=[1500.0, 2500.0], help='the range of distances from the object to the camera')
+    parser.add_argument('--distance_range', type=float, nargs=2, default=[1.5, 2.5], help='the range of distances from the object to the camera')
     # add an argument for the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)
     parser.add_argument('--phi_range', type=float, nargs=2, default=[-np.pi/3, np.pi/3], help='the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)')
     parser.add_argument('--cat', type=str, default='faucet', help='the category to collect data for (e.g. faucet, chair, etc.)')
@@ -276,91 +338,18 @@ if __name__ == '__main__':
     parser.add_argument('--clear', action='store_true', help='if true, clear the cache before collecting data')
     parser.add_argument('--gpu', action='store_true', help='if true, use the GPU')
     parser.add_argument('--tag', type=str, default='', help='a tag to add to the save directory')
+    parser.add_argument('--lvis', action='store_true', help='if true, use the lvis dataset')
     args = parser.parse_args()
 
-    context = bpy.context
-    scene = bpy.context.scene
-    render = bpy.context.scene.render
+    obj_rend = BlenderObjaverseRenderer(args)
+    obs = obj_rend.get_objaverse_objects(tag_list=[args.cat], lvis=args.lvis)
 
-    render.engine = "CYCLES"
-    render.image_settings.color_mode = 'RGBA'  # ('RGB', 'RGBA', ...)
-    render.image_settings.file_format = 'PNG'
-    render.resolution_x = 640
-    render.resolution_y = 640
-    render.resolution_percentage = 100
-    bpy.context.scene.cycles.filter_width = 0.01
-    bpy.context.scene.render.film_transparent = True
-
-    if args.gpu:
-        bpy.context.scene.cycles.device = 'GPU'
-    bpy.context.scene.cycles.diffuse_bounces = 1
-    bpy.context.scene.cycles.glossy_bounces = 1
-    bpy.context.scene.cycles.transparent_max_bounces = 3
-    bpy.context.scene.cycles.transmission_bounces = 3
-    bpy.context.scene.cycles.samples = 32
-    bpy.context.scene.cycles.use_denoising = True
-
-    def enable_cuda_devices():
-        prefs = bpy.context.preferences
-        cprefs = prefs.addons['cycles'].preferences
-        cprefs.get_devices()
-
-        # Attempt to set GPU device types if available
-        for compute_device_type in ('CUDA', 'OPENCL', 'NONE'):
-            try:
-                cprefs.compute_device_type = compute_device_type
-                print("Compute device selected: {0}".format(compute_device_type))
-                break
-            except TypeError:
-                pass
-
-        # Any CUDA/OPENCL devices?
-        acceleratedTypes = ['CUDA', 'OPENCL']
-        accelerated = any(device.type in acceleratedTypes for device in cprefs.devices)
-        print('Accelerated render = {0}'.format(accelerated))
-
-        # If we have CUDA/OPENCL devices, enable only them, otherwise enable
-        # all devices (assumed to be CPU)
-        print(cprefs.devices)
-        for device in cprefs.devices:
-            device.use = not accelerated or device.type in acceleratedTypes
-            print('Device enabled ({type}) = {enabled}'.format(type=device.type, enabled=device.use))
-
-        return accelerated
-
-    enable_cuda_devices()
-
-    save_dir = f"{args.save_dir}/{args.cat}{'_' + args.tag if args.tag else ''}{f'_debug' if args.debug else ''}"
-
-    if args.debug or args.clear:
-        # delete the save directory if it exists
-        if os.path.exists(save_dir):
-            import shutil
-            shutil.rmtree(save_dir)
-
-    # create the save directory if it doesn't exist
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-
-    # in save_dir, dump the arguments into a json file
-    import json
-    with open(f"{save_dir}/args.json", 'w') as f:
-        json.dump(vars(args), f, indent=4)
-
-    # get the objects
-    obs = get_objaverse_objects(tag_list=[args.cat])
-
-    # render the objects
     i = 0
+
     from tqdm import tqdm
+
     num_obj = min(args.N, len(obs))
     obs = list(obs.items())[:min(5, num_obj)] if args.debug else list(obs.items())[:num_obj]
     for uid, glb in tqdm(obs, total=len(obs), desc='rendering objects'):
-        collect_one_object(save_dir,
-                           f"{i}_{uid}",
-                           glb,
-                           num_samples=24 if args.debug else args.num_samples,
-                           distance_range=args.distance_range,
-                           phi_range=args.phi_range,
-                           sweep=args.debug)
+        obj_rend.collect_one_object(f"{i}_{uid}", glb)
         i += 1
