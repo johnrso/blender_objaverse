@@ -215,6 +215,7 @@ class BlenderObjaverseRenderer:
         self.join_meshes()
         self.center_mesh()
         self.resize_object(0.7)
+        bpy.ops.mesh.primitive_plane_add(size=100, enter_editmode=False, align='WORLD', location=(0, 0, 0), scale=(1, 1, 1))
 
         # render the object
         self.randomize_lighting()
@@ -351,7 +352,7 @@ if __name__ == '__main__':
     # add an argument for a range of distances from the camera to the object
     parser.add_argument('--distance_range', type=float, nargs=2, default=[1.5, 3.5], help='the range of distances from the object to the camera')
     # add an argument for the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)
-    parser.add_argument('--phi_range', type=float, nargs=2, default=[-np.pi/3, np.pi/3], help='the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)')
+    parser.add_argument('--phi_range', type=float, nargs=2, default=[np.pi / 12, np.pi], help='the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)')
     parser.add_argument('--cat', type=str, default='faucet', help='the category to collect data for (e.g. faucet, chair, etc.)')
     parser.add_argument('--N', type=int, default=1000, help='the number of objects to collect data for')
     parser.add_argument('--clear', action='store_true', help='if true, clear the cache before collecting data')
