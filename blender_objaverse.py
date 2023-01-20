@@ -1,4 +1,5 @@
 import bpy, bpycv
+import tqdm
 from bpycv import pose_utils
 import objaverse
 import math, mathutils
@@ -11,6 +12,35 @@ import mediapy as mp
 import matplotlib.pyplot as plt
 import random
 
+def get_objaverse_objects(tag_list=["faucet"], lvis=True):
+    """
+    Get a list of objects from the objaverse with the given tag list
+
+    :param tag_list: the list of tags to search for
+    :type tag_list: list
+
+    :return: a dictionary of objects with the uid as the key, and the glb filepath as the value
+    """
+
+    lvis_annotations = objaverse.load_lvis_annotations()
+    if tag_list[0] in lvis_annotations and lvis:
+        print("tag found in lvis annotations")
+        uids = lvis_annotations[tag_list[0]]
+
+    else:
+        def find_tag(anno, tag_list=["faucet"]):
+            for tag in anno['tags']:
+                if tag['name'] in tag_list:
+                    return True
+
+            return False
+
+        annotations = objaverse.load_annotations()
+        uids = [uid for uid, annotation in annotations.items() if find_tag(annotation, tag_list=tag_list)]
+    obs = objaverse.load_objects(uids[:50])
+
+    return obs
+
 class BlenderObjaverseRenderer:
     def __init__(self, args):
 
@@ -21,8 +51,8 @@ class BlenderObjaverseRenderer:
         self.render.engine = "CYCLES"
         self.render.image_settings.color_mode = 'RGBA'  # ('RGB', 'RGBA', ...)
         self.render.image_settings.file_format = 'PNG'
-        self.render.resolution_x = 224
-        self.render.resolution_y = 224
+        self.render.resolution_x = 640
+        self.render.resolution_y = 640
         self.render.resolution_percentage = 100
         bpy.context.scene.cycles.filter_width = 0.01
         bpy.context.scene.render.film_transparent = True
@@ -36,26 +66,42 @@ class BlenderObjaverseRenderer:
         bpy.context.scene.cycles.samples = 32
         bpy.context.scene.cycles.use_denoising = True
 
-        self.save_dir = f"{args.save_dir}/{args.cat}{'_' + args.tag if args.tag else ''}{f'_debug' if args.debug else ''}"
-        if args.debug or args.clear:
-            # delete the save directory if it exists
-            if os.path.exists(self.save_dir):
-                import shutil
-                shutil.rmtree(self.save_dir)
+        def enable_cuda_devices():
+            prefs = bpy.context.preferences
+            cprefs = prefs.addons['cycles'].preferences
+            cprefs.get_devices()
 
-        # create the save directory if it doesn't exist
-        if not os.path.exists(self.save_dir):
-            os.makedirs(self.save_dir)
+            # Attempt to set GPU device types if available
+            for compute_device_type in ('CUDA', 'OPENCL', 'NONE'):
+                try:
+                    cprefs.compute_device_type = compute_device_type
+                    print("Compute device selected: {0}".format(compute_device_type))
+                    break
+                except TypeError:
+                    pass
 
-        # in save_dir, dump the arguments into a json file
-        import json
-        with open(f"{self.save_dir}/args.json", 'w') as f:
-            json.dump(vars(args), f, indent=4)
+            # Any CUDA/OPENCL devices?
+            acceleratedTypes = ['CUDA', 'OPENCL']
+            accelerated = any(device.type in acceleratedTypes for device in cprefs.devices)
+            print('Accelerated render = {0}'.format(accelerated))
+
+            # If we have CUDA/OPENCL devices, enable only them, otherwise enable
+            # all devices (assumed to be CPU)
+            print(cprefs.devices)
+            for device in cprefs.devices:
+                device.use = not accelerated or device.type in acceleratedTypes
+                print('Device enabled ({type}) = {enabled}'.format(type=device.type, enabled=device.use))
+
+            return accelerated
+
+        enable_cuda_devices()
+
+        self.save_dir = f"{args.save_dir}/{args.cat}{'_lvis' if args.lvis else ''}_samp{args.num_samples}_num{num_obj}{'_' + args.tag if args.tag else ''}{f'_debug' if args.debug else ''}"
 
         self.cam = self.scene.objects["Camera"]
-        self.cam.location = (0, 1.2, 0)
-        self.cam.data.lens = 35
-        self.cam.data.sensor_width = 32
+        # self.cam.location = (0, 1.2, 0)
+        # self.cam.data.lens = 35
+        # self.cam.data.sensor_width = 32
 
         self.cam_constraint = self.cam.constraints.new(type="TRACK_TO")
         self.cam_constraint.track_axis = "TRACK_NEGATIVE_Z"
@@ -77,7 +123,7 @@ class BlenderObjaverseRenderer:
         self.debug = args.debug
 
     def randomize_lighting(self):
-        self.light2.energy = random.uniform(5000, 35000)
+        self.light2.energy = random.uniform(25000, 50000)
         bpy.data.objects["Area"].location[0] = 0
         bpy.data.objects["Area"].location[1] = 0
         bpy.data.objects["Area"].location[2] = random.uniform(1, 2)
@@ -94,9 +140,10 @@ class BlenderObjaverseRenderer:
         """Joins all the meshes in the scene into one mesh."""
         # get all the meshes in the scene
         meshes = [obj for obj in bpy.data.objects if obj.type == "MESH"]
-        # join all of the meshes
         bpy.ops.object.select_all(action="DESELECT")
         for mesh in meshes:
+            for uvmap in mesh.data.uv_layers:
+                uvmap.name = 'UVMap'
             mesh.select_set(True)
             bpy.context.view_layer.objects.active = mesh
         # join the meshes
@@ -172,34 +219,6 @@ class BlenderObjaverseRenderer:
         # render the object
         self.randomize_lighting()
 
-    def get_objaverse_objects(self, tag_list=["faucet"], lvis=True):
-        """
-        Get a list of objects from the objaverse with the given tag list
-
-        :param tag_list: the list of tags to search for
-        :type tag_list: list
-
-        :return: a dictionary of objects with the uid as the key, and the glb filepath as the value
-        """
-
-        lvis_annotations = objaverse.load_lvis_annotations()
-        if tag_list[0] in lvis_annotations and lvis:
-            print("tag found in lvis annotations")
-            uids = lvis_annotations[tag_list[0]]
-
-        else:
-            def find_tag(anno, tag_list=["faucet"]):
-                for tag in anno['tags']:
-                    if tag['name'] in tag_list:
-                        return True
-
-                return False
-
-            annotations = objaverse.load_annotations()
-            uids = [uid for uid, annotation in annotations.items() if find_tag(annotation, tag_list=tag_list)]
-        obs = objaverse.load_objects(uids[:50])
-
-        return obs
 
     def save_rendered_image(self, path, file_name):
         """
@@ -224,7 +243,7 @@ class BlenderObjaverseRenderer:
         mask_img = Image.fromarray(np.uint8(mask))
         mask_img.save(f"{path}/{file_name}_mask.png")
 
-        # change depth shape from (224, 224) to (224, 224, 3)
+        # change depth shape from (640, 640) to (640, 640, 3)
         depth = (res["depth"]) # default blender units is mm, switch to meters
         depth = np.stack((depth, depth, depth), axis=2)
         np.save(f"{path}/{file_name}_depth.npy", depth)
@@ -330,26 +349,39 @@ if __name__ == '__main__':
     parser.add_argument('--debug', action='store_true', help='if true, delete the save directory if it exists')
     parser.add_argument('--num_samples', type=int, default=100, help='the number of samples to take')
     # add an argument for a range of distances from the camera to the object
-    parser.add_argument('--distance_range', type=float, nargs=2, default=[1.5, 2.5], help='the range of distances from the object to the camera')
+    parser.add_argument('--distance_range', type=float, nargs=2, default=[1.5, 3.5], help='the range of distances from the object to the camera')
     # add an argument for the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)
     parser.add_argument('--phi_range', type=float, nargs=2, default=[-np.pi/3, np.pi/3], help='the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)')
     parser.add_argument('--cat', type=str, default='faucet', help='the category to collect data for (e.g. faucet, chair, etc.)')
-    parser.add_argument('--N', type=int, default=10, help='the number of objects to collect data for')
+    parser.add_argument('--N', type=int, default=1000, help='the number of objects to collect data for')
     parser.add_argument('--clear', action='store_true', help='if true, clear the cache before collecting data')
     parser.add_argument('--gpu', action='store_true', help='if true, use the GPU')
     parser.add_argument('--tag', type=str, default='', help='a tag to add to the save directory')
     parser.add_argument('--lvis', action='store_true', help='if true, use the lvis dataset')
     args = parser.parse_args()
 
-    obj_rend = BlenderObjaverseRenderer(args)
-    obs = obj_rend.get_objaverse_objects(tag_list=[args.cat], lvis=args.lvis)
-
-    i = 0
-
-    from tqdm import tqdm
-
+    obs = get_objaverse_objects(tag_list=[args.cat], lvis=args.lvis)
     num_obj = min(args.N, len(obs))
     obs = list(obs.items())[:min(5, num_obj)] if args.debug else list(obs.items())[:num_obj]
-    for uid, glb in tqdm(obs, total=len(obs), desc='rendering objects'):
+
+    save_dir = f"{args.save_dir}/{args.cat}{'_lvis' if args.lvis else ''}_samp{args.num_samples}_num{num_obj}{'_' + args.tag if args.tag else ''}{f'_debug' if args.debug else ''}"
+    if args.debug or args.clear:
+        # delete the save directory if it exists
+        if os.path.exists(save_dir):
+            import shutil
+            shutil.rmtree(save_dir)
+
+    # create the save directory if it doesn't exist
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    # in save_dir, dump the arguments into a json file
+    import json
+    with open(f"{save_dir}/args.json", 'w') as f:
+        json.dump(vars(args), f, indent=4)
+
+    i = 0
+    obj_rend = BlenderObjaverseRenderer(args)
+    for uid, glb in tqdm.tqdm(obs, total=len(obs), desc='rendering objects'):
         obj_rend.collect_one_object(f"{i}_{uid}", glb)
         i += 1
