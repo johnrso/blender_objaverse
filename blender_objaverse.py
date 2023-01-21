@@ -37,7 +37,7 @@ def get_objaverse_objects(tag_list=["faucet"], lvis=True):
 
         annotations = objaverse.load_annotations()
         uids = [uid for uid, annotation in annotations.items() if find_tag(annotation, tag_list=tag_list)]
-    obs = objaverse.load_objects(uids[:50])
+    obs = objaverse.load_objects(uids)
 
     return obs
 
@@ -216,7 +216,7 @@ class BlenderObjaverseRenderer:
         self.join_meshes()
         self.center_mesh()
         self.resize_object(0.7)
-        bpy.ops.mesh.primitive_plane_add(size=100, enter_editmode=False, align='WORLD', location=(0, 0, 0), scale=(1, 1, 1))
+        # bpy.ops.mesh.primitive_plane_add(size=100, enter_editmode=False, align='WORLD', location=(0, 0, 0), scale=(1, 1, 1))
 
         # render the object
         self.randomize_lighting()
@@ -251,6 +251,18 @@ class BlenderObjaverseRenderer:
         np.save(f"{path}/{file_name}_depth.npy", depth)
         plt.imsave(f"{path}/{file_name}_depth_vis.png", depth[..., 0])
 
+    def sapien_camera_matrix_from_lookat(self, eye, at, up):
+        # The coordinate frame in Sapien is: x(forward), y(left), z(upward)
+        # The principle axis of the camera is the x-axis
+        forward = (at - eye) / np.linalg.norm(at - eye)
+        left = np.cross(up, forward) / np.linalg.norm(np.cross(up, forward))
+        upward = np.cross(forward, left)
+        R = np.stack([forward, left, upward], axis=1)
+        mat44 = np.eye(4)
+        mat44[:3, :3] = R
+        mat44[:3, 3] = eye
+        return mat44
+
     def dump_object(self, save_dir, i):
         """
         Dump the captured render, the camera matrix, and the depth map to the given directory
@@ -269,10 +281,13 @@ class BlenderObjaverseRenderer:
         self.reset_lighting()
         # save the camera matrix
         # camera_matrix = bpy.context.scene.camera.matrix_world
-
         info = pose_utils.get_K_world_to_cam(bpy.context.scene.camera)
-        camera_matrix = info["world_to_cam"]
         K = info["intrinsic_matrix"]
+
+        eye = np.array(self.cam.location)
+        at_axis = np.array(self.cam.matrix_world.to_quaternion() @ Vector((0, 0, -1)))
+        up_axis = np.array(self.cam.matrix_world.to_quaternion() @ Vector((0, 1, 0)))
+        camera_matrix = self.sapien_camera_matrix_from_lookat(eye, at_axis, up_axis)
 
         K_fn = f"{self.save_dir}/_K.npy"
         if not os.path.exists(K_fn):
@@ -283,7 +298,9 @@ class BlenderObjaverseRenderer:
                         [1,  0,  0,  0],
                         [0,  0,  0,  1]]).T # this matches the one in the other dataset
 
-        camera_matrix = camera_matrix
+        # camera_matrix = camera_matrix
+        camera_matrix = camera_matrix @ rot
+
         np.save(f"{save_dir}/{i_str}_cam_pose.npy", camera_matrix)
 
     def collect_one_object(self, uid, glb):
@@ -325,6 +342,8 @@ class BlenderObjaverseRenderer:
             y = math.sin(theta) * math.cos(phi) * distance
             z = math.sin(phi) * distance
 
+            print(x,y,z)
+
 
             self.cam_constraint.target = self.mesh
             self.cam.location = (x, y, z)
@@ -357,7 +376,7 @@ if __name__ == '__main__':
     # add an argument for a range of distances from the camera to the object
     parser.add_argument('--distance_range', type=float, nargs=2, default=[.7, 3.5], help='the range of distances from the object to the camera')
     # add an argument for the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)
-    parser.add_argument('--phi_range', type=float, nargs=2, default=[np.pi / 12, np.pi / 2], help='the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)')
+    parser.add_argument('--phi_range', type=float, nargs=2, default=[np.pi / 6, np.pi / 2], help='the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)')
     parser.add_argument('--cat', type=str, default='faucet', help='the category to collect data for (e.g. faucet, chair, etc.)')
     parser.add_argument('--N', type=int, default=1000, help='the number of objects to collect data for')
     parser.add_argument('--clear', action='store_true', help='if true, clear the cache before collecting data')
