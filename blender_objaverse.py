@@ -99,10 +99,11 @@ class BlenderObjaverseRenderer:
         self.save_dir = f"{args.save_dir}/{args.cat}{'_lvis' if args.lvis else ''}_samp{args.num_samples}_num{num_obj}{'_' + args.tag if args.tag else ''}{f'_debug' if args.debug else ''}"
 
         self.cam = self.scene.objects["Camera"]
-        # self.cam.location = (0, 1.2, 0)
-        # self.cam.data.lens = 35
-        # self.cam.data.sensor_width = 32
+        self.cam.location = (0, 1.2, 0)
+        self.cam.data.lens = 35
+        self.cam.data.sensor_width = 32
 
+        # get self.cam's intrinsic matrix
         self.cam_constraint = self.cam.constraints.new(type="TRACK_TO")
         self.cam_constraint.track_axis = "TRACK_NEGATIVE_Z"
         self.cam_constraint.up_axis = "UP_Y"
@@ -269,16 +270,20 @@ class BlenderObjaverseRenderer:
         # save the camera matrix
         # camera_matrix = bpy.context.scene.camera.matrix_world
 
-        camera_matrix = pose_utils.get_4x4_world_to_cam_from_blender(bpy.context.scene.camera)
+        info = pose_utils.get_K_world_to_cam(bpy.context.scene.camera)
+        camera_matrix = info["world_to_cam"]
+        K = info["intrinsic_matrix"]
 
-        # camera_matrix is currently uvz (RDF); convert to FLU
-        # note that this is the same as in get_uvz_to_sapien
+        K_fn = f"{self.save_dir}/_K.npy"
+        if not os.path.exists(K_fn):
+            np.save(K_fn, K)
+
         rot = np.array([[0, -1,  0,  0],
                         [0,  0, -1,  0],
                         [1,  0,  0,  0],
-                        [0,  0,  0,  1]])
+                        [0,  0,  0,  1]]).T # this matches the one in the other dataset
 
-        camera_matrix = rot @ camera_matrix
+        camera_matrix = camera_matrix
         np.save(f"{save_dir}/{i_str}_cam_pose.npy", camera_matrix)
 
     def collect_one_object(self, uid, glb):
@@ -350,7 +355,7 @@ if __name__ == '__main__':
     parser.add_argument('--debug', action='store_true', help='if true, delete the save directory if it exists')
     parser.add_argument('--num_samples', type=int, default=100, help='the number of samples to take')
     # add an argument for a range of distances from the camera to the object
-    parser.add_argument('--distance_range', type=float, nargs=2, default=[1.5, 3.5], help='the range of distances from the object to the camera')
+    parser.add_argument('--distance_range', type=float, nargs=2, default=[.7, 3.5], help='the range of distances from the object to the camera')
     # add an argument for the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)
     parser.add_argument('--phi_range', type=float, nargs=2, default=[np.pi / 12, np.pi / 2], help='the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)')
     parser.add_argument('--cat', type=str, default='faucet', help='the category to collect data for (e.g. faucet, chair, etc.)')
