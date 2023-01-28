@@ -374,7 +374,7 @@ if __name__ == '__main__':
     parser.add_argument('--debug', action='store_true', help='if true, delete the save directory if it exists')
     parser.add_argument('--num_samples', type=int, default=100, help='the number of samples to take')
     # add an argument for a range of distances from the camera to the object
-    parser.add_argument('--distance_range', type=float, nargs=2, default=[.7, 3.5], help='the range of distances from the object to the camera')
+    parser.add_argument('--distance_range', type=float, nargs=2, default=[.7, 1.5], help='the range of distances from the object to the camera')
     # add an argument for the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)
     parser.add_argument('--phi_range', type=float, nargs=2, default=[np.pi / 6, np.pi / 2], help='the range of angles to rotate the camera on the vertical axis (0 is straight down, pi/2 is straight out)')
     parser.add_argument('--cat', type=str, default='faucet', help='the category to collect data for (e.g. faucet, chair, etc.)')
